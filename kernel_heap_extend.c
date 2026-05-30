@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <time.h>
 
 #define PAGE_SIZE 4096
 #define ALIGN8(x) (((x) + 7) & ~7)
@@ -12,6 +14,9 @@
 #define EMPTY_REGION_CACHE_LIMIT 2
 #define LARGE_ALLOCATION_THRESHOLD (8 * PAGE_SIZE)
 #define MAX_REGIONS 128
+#define STRESS_STEPS 2000  // Số lượng thao tác test
+#define MAX_PTRS 200       // Số lượng con trỏ quản lý tối đa cùng lúc
+#define MAX_POINTERS 50
 
 const size_t bin_limits[NUM_BINS] = {64, 512, 40960};
 
@@ -416,38 +421,206 @@ void print_region_status(void) {
 }
 
 int main(void) {
-    printf("=== HEAP6FIX4: SIMPLIFIED REGION POLICY ===\n");
-
-    void *p1 = kalloc(32);
-    void *p2 = kalloc(256);
-    void *p3 = kalloc(120);
-    void *p4 = kalloc(180);
-    void *p5 = kalloc(500);
-
-    print_bins_status();
-    print_region_status();
-
-    kfree(p1);
-    kfree(p2);
+printf("=== KHỞI ĐỘNG BÀI STRESS TEST TỰ ĐỘNG ===\n");
     
+    // Khởi tạo số ngẫu nhiên ngẫu nhiên theo thời gian
+    srand(time(NULL)); 
+
+    void *ptrs[MAX_PTRS] = {NULL};
+    size_t sizes[MAX_PTRS] = {0};
     
+    int success_allocs = 0;
+    int success_frees = 0;
+
+    for (int i = 0; i < STRESS_STEPS; i++) {
+        // Chọn ngẫu nhiên một vị trí (slot) trong mảng con trỏ
+        int slot = rand() % MAX_PTRS;
+
+        if (ptrs[slot] == NULL) {
+            // Nếu slot trống -> Tiến hành KALLOC
+            // Kích thước ngẫu nhiên từ 8 đến 5000 bytes
+            size_t size = (rand() % 5000) + 8; 
+            
+            ptrs[slot] = kalloc(size);
+            sizes[slot] = size;
+
+            if (ptrs[slot] != NULL) {
+                success_allocs++;
+                // GHI THỬ DỮ LIỆU: Điền một ký tự đặc trưng vào vùng nhớ vừa cấp phát
+                // để lát nữa kiểm tra xem có bị thằng khác ghi đè lên không
+                unsigned char *buf = (unsigned char *)ptrs[slot];
+                for (size_t j = 0; j < size; j++) {
+                    buf[j] = (unsigned char)(slot & 0xFF);
+                }
+            }
+        } else {
+            // Nếu slot đang có dữ liệu -> KIỂM TRA DỮ LIỆU TRƯỚC KHI KFREE
+            unsigned char *buf = (unsigned char *)ptrs[slot];
+            int is_corrupted = 0;
+            
+            for (size_t j = 0; j < sizes[slot]; j++) {
+                if (buf[j] != (unsigned char)(slot & 0xFF)) {
+                    is_corrupted = 1;
+                    break;
+                }
+            }
+
+            if (is_corrupted) {
+                printf("[LỖI NGHIÊM TRỌNG] Bộ nhớ tại slot %d (ptr: %p) đã bị dính vùng nhớ khác đè lên!\n", slot, ptrs[slot]);
+                print_bins_status();
+                return 1; // Dừng chương trình vì bị lỗi quản lý con trỏ
+            }
+
+            // Nếu dữ liệu toàn vẹn -> Tiến hành KFREE
+            kfree(ptrs[slot]);
+            ptrs[slot] = NULL;
+            sizes[slot] = 0;
+            success_frees++;
+        }
+
+        // Cứ sau 500 bước thì in tiến độ ra màn hình
+        if (i % 500 == 0) {
+            printf("[TIẾN ĐỘ] Đã chạy %d bước... (Cấp phát thành công: %d, Giải phóng: %d)\n", 
+                   i, success_allocs, success_frees);
+        }
+    }
+
+    // Giải phóng toàn bộ những con trỏ còn sót lại cuối ngày
+    for (int slot = 0; slot < MAX_PTRS; slot++) {
+        if (ptrs[slot] != NULL) {
+            kfree(ptrs[slot]);
+            success_frees++;
+        }
+    }
+
+    printf("\n=== KẾT QUẢ BÀI STRESS TEST: ===\n");
+    printf("Tổng số lần cấp phát thành công: %d\n", success_allocs);
+    printf("Tổng số lần giải phóng thành công: %d\n", success_frees);
     
-
-    printf("\n--- After freeing all blocks ---\n");
+    // In trạng thái cuối cùng để kiểm tra xem Free List có bị rò rỉ dữ liệu không
     print_bins_status();
     print_region_status();
+    // Mảng để lưu trữ tạm thời các con trỏ được cấp phát, giúp bạn dễ quản lý khi tương tác
+    void *allocated_pointers[MAX_POINTERS];
+    size_t pointer_sizes[MAX_POINTERS];
+    int total_ptrs = 0;
 
-    void *p6 = kalloc(64);
-    void *p7 = kalloc(3000);
-    printf("\n--- After reusing cached space ---\n");
-    print_bins_status();
-    print_region_status();
+    // Khởi tạo mảng quản lý con trỏ ban đầu đều rỗng
+    for (int i = 0; i < MAX_POINTERS; i++) {
+        allocated_pointers[i] = NULL;
+        pointer_sizes[i] = 0;
+    }
 
-    kfree(p6);
-    kfree(p7);
-    printf("\n--- Final state ---\n");
-    print_bins_status();
-    print_region_status();
+    printf("=== HEAP INTERACTIVE CLI MANAGEMENT ===\n");
+    printf("Code mo phong Kernel Heap Allocator bang mmap()\n");
+
+    while (1) {
+        printf("\n==================================================\n");
+        printf("DANH SACH CON TRO DANG QUAN LY (Tong so: %d):\n", total_ptrs);
+        
+        int has_ptr = 0;
+        for (int i = 0; i < MAX_POINTERS; i++) {
+            if (allocated_pointers[i] != NULL) {
+                printf("  [%d] Dia chi: %p | Kich thuoc da xin: %zu bytes\n", 
+                       i, allocated_pointers[i], pointer_sizes[i]);
+                has_ptr = 1;
+            }
+        }
+        if (!has_ptr) {
+            printf("  (Hien tai chua co con tro nao duoc cap phat)\n");
+        }
+
+        printf("\nCHON HANH DONG:\n");
+        printf("1. Kalloc (Cap phat bo nho moi)\n");
+        printf("2. Kfree (Giai phong con tro dang co)\n");
+        printf("3. Print Status (Xem chi tiet phan manh Heap/Bins/Regions)\n");
+        printf("4. Exit (Thoat chuong trinh)\n");
+        printf("Nhap lua chon cua ban (1-4): ");
+
+        int choice;
+        if (scanf("%d", &choice) != 1) {
+            // Xóa bộ đệm bàn phím nếu nhập sai định dạng ký tự
+            while (getchar() != '\n');
+            printf("[LOI] Vui long chi nhap so tu 1 den 4!\n");
+            continue;
+        }
+
+        if (choice == 1) {
+            // TÌM SLOT TRỐNG TRONG MẢNG ĐỂ LƯU CON TRỎ MỚI
+            int slot = -1;
+            for (int i = 0; i < MAX_POINTERS; i++) {
+                if (allocated_pointers[i] == NULL) {
+                    slot = i;
+                    break;
+                }
+            }
+
+            if (slot == -1) {
+                printf("[LOI] Mang quan ly con tro da day (%d slots). Hay kfree bot trước!\n", MAX_POINTERS);
+                continue;
+            }
+
+            size_t req_size;
+            printf("Nhap so bytes muon cap phat (size_t): ");
+            if (scanf("%zu", &req_size) != 1 || req_size <= 0) {
+                while (getchar() != '\n');
+                printf("[LOI] Kich thuoc khong hop le!\n");
+                continue;
+            }
+
+            printf("\n--- Tien hanh goi kalloc(%zu) ---\n", req_size);
+            void *ptr = kalloc(req_size);
+
+            if (ptr != NULL) {
+                allocated_pointers[slot] = ptr;
+                pointer_sizes[slot] = req_size;
+                total_ptrs++;
+                printf("[THANH CONG] kalloc thanh cong! Luu tai ID [%d], Dia chi: %p\n", slot, ptr);
+            } else {
+                printf("[THAT BAI] kalloc khong the cap phat bo nho (He thong het tai nguyen)!\n");
+            }
+
+        } else if (choice == 2) {
+            int id_to_free;
+            printf("Nhap ID cua con tro muon giai phong (xem so o dau dong [x]): ");
+            if (scanf("%d", &id_to_free) != 1 || id_to_free < 0 || id_to_free >= MAX_POINTERS) {
+                while (getchar() != '\n');
+                printf("[LOI] ID nhap vao khong hop le!\n");
+                continue;
+            }
+
+            if (allocated_pointers[id_to_free] == NULL) {
+                printf("[LOI] Slot [%d] dang trong, khong co con tro de giai phong!\n", id_to_free);
+                continue;
+            }
+
+            printf("\n--- Tien hanh goi kfree cho ID [%d] (Dia chi: %p) ---\n", id_to_free, allocated_pointers[id_to_free]);
+            kfree(allocated_pointers[id_to_free]);
+
+            // Xóa thông tin con trỏ khỏi mảng quản lý sau khi đã giải phóng thành công
+            allocated_pointers[id_to_free] = NULL;
+            pointer_sizes[id_to_free] = 0;
+            total_ptrs--;
+
+        } else if (choice == 3) {
+            // Gọi lại 2 hàm in debug có sẵn của bạn để xem trạng thái phân mảnh
+            print_bins_status();
+            print_region_status();
+
+        } else if (choice == 4) {
+            printf("Dang thoat chuong trinh... Giai phong toan bo truoc khi thoat.\n");
+            for (int i = 0; i < MAX_POINTERS; i++) {
+                if (allocated_pointers[i] != NULL) {
+                    kfree(allocated_pointers[i]);
+                }
+            }
+            printf("Tam biet!\n");
+            break;
+
+        } else {
+            printf("[LOI] Lua chon khong hop le! Vui long nhap tu 1 den 4.\n");
+        }
+    }
 
     return 0;
 }
